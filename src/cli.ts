@@ -1,23 +1,47 @@
 import "./nodeGlobals";
 import * as readline from "node:readline";
 import { spawn } from "node:child_process";
-import { AudioEngine } from "./lib/engine/AudioEngine";
+import { AudioEngine, DEFAULT_VOLUMES } from "./lib/engine/AudioEngine";
+import AmbientAudioManager from "./lib/ambient/AmbientAudioManager";
 
 const SMOKE = process.argv.includes("--smoke");
 
+const storage = {
+  getVolumes: () => ({ ...DEFAULT_VOLUMES }),
+  setVolumes: () => {},
+  getAutoDJMode: () => "MUSIC",
+  setAutoDJMode: () => {},
+};
+
+const ambient = new AmbientAudioManager();
+
 const engine = new AudioEngine({
-  storage: {
-    getVolumes: () => ({ rain: 1, thunder: 1, campfire: 1, jungle: 1, main_track: 1 }),
-    setVolumes: () => {},
-    getAutoDJMode: () => "MUSIC",
-    setAutoDJMode: () => {},
-  },
+  storage,
   events: {
     emit: (event: string, detail?: any) => {
       console.log("[event]", event, detail ?? "");
+      if (event === "lofi-toggle-rain") ambient.toggleEffect("rain");
+      else if (event === "lofi-toggle-thunder") ambient.toggleEffect("thunder");
+      else if (event === "lofi-toggle-jungle") ambient.toggleEffect("jungle");
+      else if (event === "lofi-toggle-campfire") ambient.toggleEffect("campfire");
+      else if (event === "lofi-toggle-track") ambient.toggleTrack(detail?.id);
     },
   },
 });
+
+const initialVolumes = storage.getVolumes() || DEFAULT_VOLUMES;
+for (const id of ["rain", "thunder", "jungle", "campfire"]) {
+  ambient.setEffectVolume(id, (initialVolumes as any)[id] ?? 1);
+}
+for (let i = 1; i <= 9; i++) {
+  ambient.setTrackVolume(i, (initialVolumes as any).main_track ?? 1);
+}
+
+const originalEngineStop = engine.stop.bind(engine);
+engine.stop = () => {
+  originalEngineStop();
+  try { ambient.stopAllTracks(); } catch {}
+};
 
 let cava: any = null;
 let cavaExited = false;
@@ -43,9 +67,10 @@ function finish(code = 0) {
   finishing = true;
   killCava();
   try { engine.stop(); } catch {}
+  try { ambient.stopAllTracks(); } catch {}
   try { engine.dispose?.(); } catch {}
+  try { ambient.dispose?.(); } catch {}
   restoreTty();
-  // escalate if cava ignores SIGTERM
   setTimeout(() => {
     if (!cavaExited && cava && !cava.killed) {
       try { cava.kill("SIGKILL"); } catch {}
@@ -61,7 +86,7 @@ function setupKeys() {
   process.stdin.resume();
   process.stdin.on("data", (buf: Buffer) => {
     const key = buf.toString();
-    if (key === "\u0003") { // Ctrl+C
+    if (key === "\u0003") {
       finish(0);
       return;
     }
@@ -94,10 +119,9 @@ function setupKeys() {
 async function main() {
   console.log("LoFi Engine CLI");
   console.log("Loading samples...");
-  // wait for samples
   const waitForReady = () => new Promise<void>((resolve) => {
     const check = () => {
-      if (engine.ready) resolve();
+      if (engine.ready && ambient.ready) resolve();
       else setTimeout(check, 100);
     };
     check();
