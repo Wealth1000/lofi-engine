@@ -1,27 +1,15 @@
 import { singleOct } from './MajorScale';
 
 class Chord {
+    degree: any;
+    semitoneDist: any;
+    intervals: any;
+    nextChordIdxs: any;
     constructor(degree,intervals,nextChordIdxs) {
         this.degree = degree;
         this.semitoneDist = singleOct[degree-1];
         this.intervals = intervals;
         this.nextChordIdxs = nextChordIdxs;
-    }
-    
-    degree() {
-    	return this.degree;
-    }
-
-    semitoneDist() {
-        return this.semitoneDist;
-    }
-
-    intervals() {
-        return this.intervals;
-    }
-
-    nextChordIdxs() {
-        return this.nextChordIdxs;
     }
 
     nextChordIdx() {

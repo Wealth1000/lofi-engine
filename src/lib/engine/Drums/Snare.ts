@@ -8,15 +8,13 @@ const vol = new Tone.Volume(-6);
 const sw = new Tone.StereoWidener(0.3);
 
 class Snare {
+    sampler: any;
 	constructor(cb) {
 		this.sampler = new Tone.Sampler(samples, () => {
 			cb();
 		}).chain(lpf,vol,sw,Tone.Master);
 	}
 
-	sampler() {
-		return this.sampler;
-	}
 }
 
 export default Snare;
