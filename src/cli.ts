@@ -1,5 +1,6 @@
 import "./nodeGlobals";
 import * as Tone from "tone";
+import { spawn, execSync } from "child_process";
 import AudioEngine, { DEFAULT_VOLUMES } from "./lib/engine/AudioEngine";
 
 class NodeStorage {
@@ -37,6 +38,16 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+// Save tty settings for restoration on exit (lofi-relay style).
+let savedTty = "";
+if (process.stdin.isTTY) {
+  try {
+    savedTty = execSync("stty -g", { encoding: "utf8", stdio: ["inherit", "pipe", "pipe"] }).trim();
+  } catch (e) {
+    savedTty = "";
+  }
+}
+
 async function main(): Promise<void> {
   console.log("LoFi Engine CLI");
   console.log("Loading samples...");
@@ -58,19 +69,45 @@ async function main(): Promise<void> {
   }
   engine.start();
 
-  console.log("Playing. Controls: Space toggle, n new progression, +/- volume, q quit");
+  console.log("Playing. cava visualiser owns the terminal; Ctrl+C to quit.");
 
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
+  // Spawn cava as the foreground child process. The engine keeps running in
+  // this (background) process.
+  let cava: any;
+  try {
+    cava = spawn("cava", [], { stdio: "inherit" });
+  } catch (err) {
+    console.error("Failed to spawn cava:", err);
+    try { engine.stop(); } catch {}
+    try { engine.dispose(); } catch {}
+    process.exit(1);
   }
-  process.stdin.resume();
-  process.stdin.setEncoding("utf8");
 
-  let shutdownCalled = false;
-  const shutdown = () => {
-    if (shutdownCalled) return;
-    shutdownCalled = true;
-    console.log("\nShutting down...");
+  if (!cava.pid) {
+    console.error("Failed to spawn cava: no pid");
+    try { engine.stop(); } catch {}
+    try { engine.dispose(); } catch {}
+    process.exit(1);
+  }
+
+  const cavaPid = cava.pid;
+  let enginePid = process.pid;
+
+  let shuttingDown = false;
+  const teardown = (exitCode: number) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    // Terminate the cava child if still alive.
+    try {
+      if (cava && cava.exitCode === null && cava.signalCode === null) {
+        cava.kill("SIGTERM");
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // Terminate engine (stop playback + dispose).
     try {
       engine.stop();
     } catch (e) {
@@ -81,51 +118,51 @@ async function main(): Promise<void> {
     } catch (e) {
       // ignore
     }
-    if (process.stdin.isTTY) {
-      try {
-        process.stdin.setRawMode(false);
-      } catch (e) {
-        // ignore
+
+    // Clean up tracked PIDs.
+    void cavaPid;
+    void enginePid;
+
+    const finish = () => {
+      // Restore tty.
+      if (savedTty) {
+        try {
+          execSync(`stty ${savedTty}`, { stdio: "inherit" });
+        } catch (e) {
+          // ignore
+        }
+      } else if (process.stdin.isTTY) {
+        try {
+          process.stdin.setRawMode(false);
+        } catch (e) {
+          // ignore
+        }
       }
+      process.exit(exitCode);
+    };
+
+    if (cava.exitCode !== null || cava.signalCode !== null) {
+      finish();
+    } else {
+      const timer = setTimeout(finish, 2000);
+      cava.once("exit", () => {
+        clearTimeout(timer);
+        finish();
+      });
     }
-    process.exit(0);
   };
 
-  process.stdin.on("data", (key: string) => {
-    if (key === "q" || key === "Q") {
-      shutdown();
-      return;
-    }
-    if (key === "\u0003") {
-      shutdown();
-      return;
-    }
-    if (key === " ") {
-      engine.toggle();
-      console.log(engine.isPlaying ? "Playing" : "Paused");
-      return;
-    }
-    if (key === "n" || key === "N") {
-      engine.generateProgression();
-      console.log("Generated new progression (key " + engine.key + ")");
-      return;
-    }
-    if (key === "+" || key === "=") {
-      const next = clamp(engine.volume + 0.1, 0, 1);
-      engine.volume = next;
-      console.log(`Volume: ${Math.round(next * 100)}%`);
-      return;
-    }
-    if (key === "-" || key === "_") {
-      const next = clamp(engine.volume - 0.1, 0, 1);
-      engine.volume = next;
-      console.log(`Volume: ${Math.round(next * 100)}%`);
-      return;
-    }
+  cava.on("error", (err) => {
+    console.error("cava error:", err);
+    teardown(1);
   });
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  cava.on("exit", (code, signal) => {
+    teardown(code === null ? 0 : code);
+  });
+
+  process.on("SIGINT", () => teardown(0));
+  process.on("SIGTERM", () => teardown(0));
 }
 
 main().catch((err) => {
