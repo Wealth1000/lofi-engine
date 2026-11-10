@@ -12,7 +12,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
     "tauri:d": "tauri dev",
-    "tauri:b": "tauri build"
+    "tauri:b": "tauri build",
+    "cli:smoke": "pnpm cli:build && node dist-cli/cli.cjs --smoke"
   },
   "dependencies": {
     "@tabler/icons-svelte": "^2.47.0",

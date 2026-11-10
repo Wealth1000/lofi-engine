@@ -1,171 +1,132 @@
 import "./nodeGlobals";
-import * as Tone from "tone";
-import { spawn, execSync } from "child_process";
-import AudioEngine, { DEFAULT_VOLUMES } from "./lib/engine/AudioEngine";
+import * as readline from "node:readline";
+import { spawn } from "node:child_process";
+import { AudioEngine } from "./lib/engine/AudioEngine";
 
-class NodeStorage {
-  private volumes: Record<string, number> = { ...DEFAULT_VOLUMES };
-  private mode: string = "MUSIC";
+const SMOKE = process.argv.includes("--smoke");
 
-  getVolumes(): Record<string, number> {
-    return { ...this.volumes };
-  }
-  setVolumes(volumes: Record<string, number>): void {
-    this.volumes = { ...volumes };
-  }
-  getAutoDJMode(): string {
-    return this.mode;
-  }
-  setAutoDJMode(mode: string): void {
-    this.mode = mode;
-  }
-}
-
-const storage = new NodeStorage();
-const events = {
-  emit(name: string, detail?: any): void {
-    console.log(`[event] ${name}`, detail !== undefined ? detail : "");
+const engine = new AudioEngine({
+  getVolumes: () => ({ rain: 1, thunder: 1, campfire: 1, jungle: 1, main_track: 1 }),
+  setVolumes: () => {},
+  getAutoDJMode: () => "MUSIC",
+  setAutoDJMode: () => {},
+}, {
+  emit: (event: string, detail?: any) => {
+    console.log("[event]", event, detail ?? "");
   },
-};
+});
 
-const engine = new AudioEngine({ storage, events });
+let cava: any = null;
+let cavaExited = false;
+let finishing = false;
+let rawModeSet = false;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function restoreTty() {
+  if (rawModeSet && process.stdin.isTTY) {
+    try { process.stdin.setRawMode(false); } catch {}
+    rawModeSet = false;
+  }
+  try { process.stdin.pause(); } catch {}
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-// Save tty settings for restoration on exit (lofi-relay style).
-let savedTty = "";
-if (process.stdin.isTTY) {
-  try {
-    savedTty = execSync("stty -g", { encoding: "utf8", stdio: ["inherit", "pipe", "pipe"] }).trim();
-  } catch (e) {
-    savedTty = "";
+function killCava() {
+  if (cava && !cava.killed && !cavaExited) {
+    try { cava.kill("SIGTERM"); } catch {}
   }
 }
 
-async function main(): Promise<void> {
+function finish(code = 0) {
+  if (finishing) return;
+  finishing = true;
+  killCava();
+  try { engine.stop(); } catch {}
+  try { engine.dispose?.(); } catch {}
+  restoreTty();
+  // escalate if cava ignores SIGTERM
+  setTimeout(() => {
+    if (!cavaExited && cava && !cava.killed) {
+      try { cava.kill("SIGKILL"); } catch {}
+    }
+    process.exit(code);
+  }, 1500);
+}
+
+function setupKeys() {
+  if (!process.stdin.isTTY) return;
+  process.stdin.setRawMode(true);
+  rawModeSet = true;
+  process.stdin.resume();
+  process.stdin.on("data", (buf: Buffer) => {
+    const key = buf.toString();
+    if (key === "\u0003") { // Ctrl+C
+      finish(0);
+      return;
+    }
+    if (key === " ") {
+      engine.toggle();
+      return;
+    }
+    if (key === "n" || key === "N") {
+      engine.generateProgression();
+      console.log("[action] new progression");
+      return;
+    }
+    if (key === "+" || key === "=") {
+      engine.volume = Math.min(1, engine.volume + 0.1);
+      console.log("[volume]", engine.volume.toFixed(2));
+      return;
+    }
+    if (key === "-" || key === "_") {
+      engine.volume = Math.max(0, engine.volume - 0.1);
+      console.log("[volume]", engine.volume.toFixed(2));
+      return;
+    }
+    if (key === "q" || key === "Q") {
+      finish(0);
+      return;
+    }
+  });
+}
+
+async function main() {
   console.log("LoFi Engine CLI");
   console.log("Loading samples...");
-
-  const deadline = Date.now() + 60000;
-  while (!engine.ready && Date.now() < deadline) {
-    await sleep(100);
-  }
-  if (!engine.ready) {
-    console.error("Timed out waiting for samples to load.");
-    process.exit(1);
-  }
-  console.log("Samples loaded. Starting audio...");
-
-  try {
-    await Tone.start();
-  } catch (err) {
-    console.warn("Tone.start() warning:", err);
-  }
-  engine.start();
-
-  console.log("Playing. cava visualiser owns the terminal; Ctrl+C to quit.");
-
-  // Spawn cava as the foreground child process. The engine keeps running in
-  // this (background) process.
-  let cava: any;
-  try {
-    cava = spawn("cava", [], { stdio: "inherit" });
-  } catch (err) {
-    console.error("Failed to spawn cava:", err);
-    try { engine.stop(); } catch {}
-    try { engine.dispose(); } catch {}
-    process.exit(1);
-  }
-
-  if (!cava.pid) {
-    console.error("Failed to spawn cava: no pid");
-    try { engine.stop(); } catch {}
-    try { engine.dispose(); } catch {}
-    process.exit(1);
-  }
-
-  const cavaPid = cava.pid;
-  let enginePid = process.pid;
-
-  let shuttingDown = false;
-  const teardown = (exitCode: number) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-
-    // Terminate the cava child if still alive.
-    try {
-      if (cava && cava.exitCode === null && cava.signalCode === null) {
-        cava.kill("SIGTERM");
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    // Terminate engine (stop playback + dispose).
-    try {
-      engine.stop();
-    } catch (e) {
-      // ignore
-    }
-    try {
-      engine.dispose();
-    } catch (e) {
-      // ignore
-    }
-
-    // Clean up tracked PIDs.
-    void cavaPid;
-    void enginePid;
-
-    const finish = () => {
-      // Restore tty.
-      if (savedTty) {
-        try {
-          execSync(`stty ${savedTty}`, { stdio: "inherit" });
-        } catch (e) {
-          // ignore
-        }
-      } else if (process.stdin.isTTY) {
-        try {
-          process.stdin.setRawMode(false);
-        } catch (e) {
-          // ignore
-        }
-      }
-      process.exit(exitCode);
+  // wait for samples
+  const waitForReady = () => new Promise<void>((resolve) => {
+    const check = () => {
+      if (engine.ready) resolve();
+      else setTimeout(check, 100);
     };
+    check();
+  });
+  await waitForReady();
+  console.log("Samples loaded. Starting audio...");
+  engine.start();
+  if (SMOKE) {
+    console.log("Smoke mode: exiting in 2s");
+    await new Promise((r) => setTimeout(r, 2000));
+    finish(0);
+    return;
+  }
 
-    if (cava.exitCode !== null || cava.signalCode !== null) {
-      finish();
-    } else {
-      const timer = setTimeout(finish, 2000);
-      cava.once("exit", () => {
-        clearTimeout(timer);
-        finish();
-      });
-    }
-  };
+  setupKeys();
+  console.log("Playing. Controls: Space play/pause, n new progression, +/- volume, q quit. cava visualises (Ctrl+C to quit).");
 
-  cava.on("error", (err) => {
-    console.error("cava error:", err);
-    teardown(1);
+  cava = spawn("cava", [], { stdio: ["ignore", "inherit", "inherit"] });
+  cava.on("exit", () => {
+    cavaExited = true;
+    finish(0);
+  });
+  cava.on("error", (err: any) => {
+    console.error("cava failed to start:", err?.message || err);
+    finish(1);
   });
 
-  cava.on("exit", (code, signal) => {
-    teardown(code === null ? 0 : code);
-  });
-
-  process.on("SIGINT", () => teardown(0));
-  process.on("SIGTERM", () => teardown(0));
+  process.on("SIGINT", () => finish(0));
+  process.on("SIGTERM", () => finish(0));
 }
 
 main().catch((err) => {
-  console.error("CLI failed:", err);
-  process.exit(1);
+  console.error(err);
+  finish(1);
 });

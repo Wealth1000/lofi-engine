@@ -1,5 +1,3 @@
-declare const __dirname: string;
-
 // Resolve relative sample assets against the bundle directory.
 try {
   process.chdir(__dirname);
