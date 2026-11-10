@@ -12,162 +12,118 @@
 // @ts-ignore
   import * as Tone from "tone";
   import Visualizer from "../lib/components/Visualizer/index.svelte";
-  import ChordProgression from "../lib/engine/Chords/ChordProgression";
-  import intervalWeights from "../lib/engine/Chords/IntervalWeights";
-  import Keys from "../lib/engine/Chords/Keys";
-  import { fiveToFive } from "../lib/engine/Chords/MajorScale";
-  import Hat from "../lib/engine/Drums/Hat";
-  import Kick from "../lib/engine/Drums/Kick";
-  import Noise from "../lib/engine/Drums/Noise";
-  import Snare from "../lib/engine/Drums/Snare";
-  import Piano from "../lib/engine/Piano/Piano";
+  import AudioEngine, { DEFAULT_VOLUMES } from "./engine/AudioEngine";
 
   const STORAGE_KEY = "Volumes";
-  const DEFFAULT_VOLUMES = {
-    rain: 1,
-    thunder: 1,
-    campfire: 1,
-    jungle: 1,
-    main_track: 1,
+
+  // Browser adapters
+  const storage = {
+    getVolumes() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch (e) {
+        return null;
+      }
+    },
+    setVolumes(volumes: any) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(volumes));
+      } catch (e) {
+        // ignore
+      }
+    },
+    getAutoDJMode() {
+      try {
+        return localStorage.getItem("AutoDJMode");
+      } catch (e) {
+        return null;
+      }
+    },
+    setAutoDJMode(mode: string) {
+      try {
+        localStorage.setItem("AutoDJMode", mode);
+      } catch (e) {
+        // ignore
+      }
+    },
   };
-  // Load previous vols or defualt
-  let volumes =
-    JSON.parse(localStorage.getItem(STORAGE_KEY)) || DEFFAULT_VOLUMES;
+
+  const events = {
+    emit(name: string, detail?: any) {
+      try {
+        window.dispatchEvent(new CustomEvent(name, { detail }));
+      } catch (e) {
+        // ignore
+      }
+    },
+  };
+
+  const engine = new AudioEngine({ storage, events });
+
   // Convert linear volume (0 to 1) to dB
-  const linearToDb = (value) =>
+  const linearToDb = (value: number) =>
     value === 0 ? -Infinity : 20 * Math.log10(value);
 
-  // Setup audio chain
-  const cmp = new Tone.Compressor({
-    threshold: -6,
-    ratio: 3,
-    attack: 0.5,
-    release: 0.1,
-  });
-  const lpf = new Tone.Filter(2000, "lowpass");
-  const vol = new Tone.Volume(linearToDb(volumes.main_track));
-  Tone.Master.chain(cmp, lpf, vol);
-  Tone.Transport.bpm.value = 156;
-  Tone.Transport.swing = 1;
+  // Reactive local state mirrored from engine
+  let allSamplesLoaded = engine.allSamplesLoaded;
+  let contextStarted = engine.contextStarted;
+  let genChordsOnce = engine.genChordsOnce;
+  let isPlaying = engine.isPlaying;
+  let key = engine.key;
+  let progression: any[] = engine.progression;
+  let progress = engine.progress;
+  let autoDJMode = engine.autoDJMode;
 
-  // State variables
-  let key = "C";
-  let progression = [];
-  const dotPatterns = [
-    [],
-    [5],
-    [1, 9],
-    [1, 5, 9],
-    [1, 3, 7, 9],
-    [1, 3, 5, 7, 9],
-    [1, 3, 4, 6, 7, 9],
-    [1, 3, 4, 5, 6, 7, 9],
-  ];
-  let scale = [];
-  let progress = 0;
-  let scalePos = 0;
+  function sync() {
+    allSamplesLoaded = engine.allSamplesLoaded;
+    contextStarted = engine.contextStarted;
+    genChordsOnce = engine.genChordsOnce;
+    isPlaying = engine.isPlaying;
+    key = engine.key;
+    progression = engine.progression;
+    progress = engine.progress;
+    autoDJMode = engine.autoDJMode;
+  }
 
-  let pianoLoaded = false;
-  let kickLoaded = false;
-  let snareLoaded = false;
-  let hatLoaded = false;
+  // Wrap engine methods to keep GUI state in sync
+  const wrap = (method: string) => {
+    const original = (engine as any)[method].bind(engine);
+    (engine as any)[method] = (...args: any[]) => {
+      const result = original(...args);
+      sync();
+      return result;
+    };
+  };
+  [
+    "toggle",
+    "start",
+    "stop",
+    "startAudioContext",
+    "generateProgression",
+    "autoDJTransition",
+    "nextChord",
+  ].forEach(wrap);
 
-  let contextStarted = false;
-  let genChordsOnce = false;
+  // Hook sample-load readiness
+  const originalCheck = (engine as any).checkSamplesLoaded.bind(engine);
+  (engine as any).checkSamplesLoaded = () => {
+    originalCheck();
+    sync();
+  };
 
-  let kickOff = false;
-  let snareOff = false;
-  let hatOff = false;
-  let melodyDensity = 0.33;
-  let melodyOff = false;
-
-  let isPlaying = false;
-  let autoDJMode = "MUSIC";
-
-  // Initialize instruments
-  const pn = new Piano(() => (pianoLoaded = true)).sampler;
-  const kick = new Kick(() => (kickLoaded = true)).sampler;
-  const snare = new Snare(() => (snareLoaded = true)).sampler;
-  const hat = new Hat(() => (hatLoaded = true)).sampler;
-  const noise = Noise;
-
-  // Sequences
-  let chords, melody, kickLoop, snareLoop, hatLoop;
+  const dotPatterns = engine.dotPatterns;
 
   onMount(() => {
-    // Setup sequences
-    chords = new Tone.Sequence(
-      (time, note) => {
-        playChord();
-      },
-      [""],
-      "1n",
-    );
-
-    melody = new Tone.Sequence(
-      (time, note) => {
-        playMelody();
-      },
-      [""],
-      "8n",
-    );
-
-    kickLoop = new Tone.Sequence(
-      (time, note) => {
-        if (!kickOff) {
-          if (note === "C4" && Math.random() < 0.9) {
-            // @ts-ignore
-            kick.triggerAttack(note);
-          } else if (note === "." && Math.random() < 0.1) {
-            // @ts-ignore
-            kick.triggerAttack("C4");
-          }
-        }
-      },
-      ["C4", "", "", "", "", "", "", "C4", "C4", "", ".", "", "", "", "", ""],
-      "8n",
-    );
-
-    snareLoop = new Tone.Sequence(
-      (time, note) => {
-        if (!snareOff) {
-          if (note !== "" && Math.random() < 0.8) {
-            // @ts-ignore
-            snare.triggerAttack(note);
-          }
-        }
-      },
-      ["", "C4"],
-      "2n",
-    );
-
-    hatLoop = new Tone.Sequence(
-      (time, note) => {
-        if (!hatOff) {
-          // @ts-ignore
-          if (note !== "" && Math.random() < 0.8) {
-            // @ts-ignore
-            hat.triggerAttack(note);
-          }
-        }
-      },
-      ["C4", "C4", "C4", "C4", "C4", "C4", "C4", "C4"],
-      "4n",
-    );
-
-    chords.humanize = true;
-    melody.humanize = true;
-    kickLoop.humanize = true;
-    snareLoop.humanize = true;
-    hatLoop.humanize = true;
-
     // Listen for spacebar press
-    const handleKeydown = (e) => {
+    const handleKeydown = (e: any) => {
       if (isEditableTarget(e.target)) return;
 
       if (e.code === "Space") {
         e.preventDefault();
-        toggle();
+        engine.toggle();
+        sync();
       }
     };
 
@@ -175,25 +131,27 @@
       handleButtonAction();
     };
 
-    const handleAutoDJModeChange = (e) => {
-      autoDJMode = e.detail.mode;
+    const handleAutoDJModeChange = (e: any) => {
+      engine.autoDJMode = e.detail.mode;
+      sync();
     };
 
     // Pomodoro breaks soften the existing generator instead of creating a second audio path.
-    // The normal volume polling below restores the user's chosen setting on the next focus phase.
-    const handleFocusPhase = (e) => {
-      const isBreak = e.detail?.phase === "shortBreak" || e.detail?.phase === "longBreak";
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) || DEFFAULT_VOLUMES;
-      vol.volume.rampTo(linearToDb(saved.main_track * (isBreak ? 0.7 : 1)), 0.35);
+    const handleFocusPhase = (e: any) => {
+      const isBreak =
+        e.detail?.phase === "shortBreak" || e.detail?.phase === "longBreak";
+      const saved = storage.getVolumes() || DEFAULT_VOLUMES;
+      const vol = (engine as any).vol;
+      vol.volume.rampTo(
+        linearToDb((saved.main_track ?? 1) * (isBreak ? 0.7 : 1)),
+        0.35,
+      );
     };
 
     window.addEventListener("keydown", handleKeydown);
     window.addEventListener("lofi-toggle-play", handleCustomToggle);
     window.addEventListener("auto-dj-mode-changed", handleAutoDJModeChange);
     window.addEventListener("lofi-focus-phase", handleFocusPhase);
-
-    // Initialize mode
-    autoDJMode = localStorage.getItem("AutoDJMode") || "MUSIC";
 
     return () => {
       window.removeEventListener("keydown", handleKeydown);
@@ -205,229 +163,33 @@
 
   onDestroy(() => {
     if (Tone.Transport.state === "started") {
-      noise.stop();
+      try {
+        (engine as any).noise.stop();
+      } catch (e) {
+        // ignore
+      }
       Tone.Transport.stop();
     }
+    engine.dispose();
   });
 
-  let barCount = 0;
-  let sectionBarLength = 32; // change section every 32 bars
-  let isTransitioning = false;
-
-  function nextChord() {
-    const nextProgress = progress === progression.length - 1 ? 0 : progress + 1;
-    const nextKickOff = Math.random() < 0.15;
-    const nextSnareOff = Math.random() < 0.2;
-    const nextHatOff = Math.random() < 0.25;
-    const nextMelodyDensity = Math.random() * 0.3 + 0.2;
-    const nextMelodyOff = Math.random() < 0.25;
-
-    if (progress === 4) {
-      progress = nextProgress;
-      kickOff = nextKickOff;
-      snareOff = nextSnareOff;
-      hatOff = nextHatOff;
-    } else if (progress === 0) {
-      progress = nextProgress;
-      kickOff = nextKickOff;
-      snareOff = nextSnareOff;
-      hatOff = nextHatOff;
-      melodyDensity = nextMelodyDensity;
-      melodyOff = nextMelodyOff;
-    } else {
-      progress = nextProgress;
-    }
-    barCount++;
-    if(barCount >= sectionBarLength) {
-      barCount = 0;
-      autoDJTransition();
-      // New next transition length
-      const barLengthOptions = [16, 20, 24, 28, 32, 48];
-      sectionBarLength = barLengthOptions[Math.floor(Math.random() * barLengthOptions.length)];
-    }
-  }
-
-  function autoDJTransition() {
-    if(isTransitioning) return; // Prevent overlaps
-    if(autoDJMode === "MANUAL") return;
-
-    isTransitioning = true;
-
-    // Change keys/chords
-    generateProgression()
-    
-    // Original Instrument Logic (Applied in ALL active modes: MUSIC, ATMOSPHERE, WORLD)
-    // This was the "current main lofi track generation"
-    melodyDensity = 0.2 + Math.random() * 0.5;
-    kickOff = Math.random() < 0.13;
-    snareOff = Math.random() < 0.17;
-    hatOff = Math.random() < 0.22;
-    melodyOff = Math.random() < 0.25;
-
-    // Smart Effects: Toggle environmental effects randomly
-    // Applied in ATMOSPHERE and WORLD
-    if (autoDJMode === "ATMOSPHERE" || autoDJMode === "WORLD") {
-      const effects = ["rain", "thunder", "jungle", "campfire"];
-      // 30% chance to toggle an effect
-      if (Math.random() < 0.3) {
-        const effect = effects[Math.floor(Math.random() * effects.length)];
-        window.dispatchEvent(new CustomEvent(`lofi-toggle-${effect}`));
-      }
-    }
-
-    // Smart Tracks: Toggle tracks randomly
-    // Applied ONLY in WORLD
-    if (autoDJMode === "WORLD") {
-      // 20% chance to toggle a track
-      if (Math.random() < 0.2) {
-        const trackId = Math.floor(Math.random() * 9) + 1; // 1-9
-        window.dispatchEvent(new CustomEvent("lofi-toggle-track", { detail: { id: trackId } }));
-      }
-    }
-
-    // Crossfade FX (Always apply for smoother transitions if not OFF)
-    lpf.frequency.linearRampTo(300, 2) // 2s Muffle
-    setTimeout(() => {
-      lpf.frequency.linearRampTo(1200, 2) // Open back up
-      setTimeout(() => {
-        isTransitioning = false;
-      }, 2000);
-    }, 2000);
-  }
-
-  function playChord() {
-    const chord = progression[progress];
-    const root = Tone.Frequency(key + "3").transpose(chord.semitoneDist);
-    const size = 4;
-    const voicing = chord.generateVoicing(size);
-    const notes = Tone.Frequency(root)
-      .harmonize(voicing)
-      .map((f) => Tone.Frequency(f).toNote());
-    // @ts-ignore
-    pn.triggerAttackRelease(notes, "1n");
-    nextChord();
-  }
-
-  function playMelody() {
-    if (melodyOff || !(Math.random() < melodyDensity)) {
-      return;
-    }
-
-    const descendRange = Math.min(scalePos, 7) + 1;
-    const ascendRange = Math.min(scale.length - scalePos, 7);
-
-    let descend = descendRange > 1;
-    let ascend = ascendRange > 1;
-
-    if (descend && ascend) {
-      if (Math.random() > 0.5) {
-        ascend = !descend;
-      } else {
-        descend = !ascend;
-      }
-    }
-
-    let weights = descend
-      ? intervalWeights.slice(0, descendRange)
-      : intervalWeights.slice(0, ascendRange);
-
-    const sum = weights.reduce((prev, curr) => prev + curr, 0);
-    weights = weights.map((w) => w / sum);
-    for (let i = 1; i < weights.length; i++) {
-      weights[i] += weights[i - 1];
-    }
-
-    const randomWeight = Math.random();
-    let scaleDist = 0;
-    let found = false;
-    while (!found) {
-      if (randomWeight <= weights[scaleDist]) {
-        found = true;
-      } else {
-        scaleDist++;
-      }
-    }
-
-    const scalePosChange = descend ? -scaleDist : scaleDist;
-    const newScalePos = scalePos + scalePosChange;
-
-    scalePos = newScalePos;
-    // @ts-ignore
-    pn.triggerAttackRelease(scale[newScalePos], "2n");
-  }
-
-  function generateProgression() {
-    const _scale = fiveToFive;
-    const newKey = Keys[Math.floor(Math.random() * Keys.length)];
-    const newScale = Tone.Frequency(newKey + "5")
-      .harmonize(_scale)
-      .map((f) => Tone.Frequency(f).toNote());
-    const newProgression = ChordProgression.generate(8);
-    const newScalePos = Math.floor(Math.random() * _scale.length);
-
-    key = newKey;
-    progress = 0;
-    progression = newProgression;
-    scale = newScale;
-    genChordsOnce = true;
-    scalePos = newScalePos;
-  }
-
-  function toggle() {
-    progress = 0;
-    if (Tone.Transport.state === "started") {
-      noise.stop();
-      Tone.Transport.stop();
-      isPlaying = false;
-    } else {
-      Tone.start();
-      Tone.Transport.start();
-      noise.start(0);
-      chords.start(0);
-      melody.start(0);
-      kickLoop.start(0);
-      snareLoop.start(0);
-      hatLoop.start(0);
-      isPlaying = true;
-    }
-    window.dispatchEvent(new CustomEvent("lofi-play-state-changed", { detail: { isPlaying } }));
-  }
-
-  function startAudioContext() {
-    Tone.start();
-    contextStarted = true;
-  }
-
-  $: allSamplesLoaded = pianoLoaded && kickLoaded && snareLoaded && hatLoaded;
   $: activeProgressionIndex = (progress + 7) % 8;
-  // Update volume
-  onMount(() => {
-    setInterval(() => {
-      let updatedVol =
-        JSON.parse(localStorage.getItem(STORAGE_KEY)) || DEFFAULT_VOLUMES;
-      vol.volume.value = linearToDb(updatedVol.main_track);
-    }, 100);
-  });
-  // automically start audio context after samples are loaded
-  $: if (allSamplesLoaded && !contextStarted) {
-    startAudioContext();
-    generateProgression();
-  }
 
   function handleButtonAction() {
-    if (!allSamplesLoaded) {
+    if (!engine.allSamplesLoaded) {
       // Do nothing, button is disabled
       return;
-    } else if (!contextStarted) {
+    } else if (!engine.contextStarted) {
       // Initialize audio context
-      startAudioContext();
-    } else if (!genChordsOnce) {
+      engine.startAudioContext();
+    } else if (!engine.genChordsOnce) {
       // Chords not generated yet, can't play
       return;
     } else {
       // Normal play/pause functionality
-      toggle();
+      engine.toggle();
     }
+    sync();
   }
 </script>
 
@@ -480,7 +242,10 @@
             class="generateBtn"
             data-tooltip={$t.focus.shuffle_notes}
             aria-label={$t.focus.shuffle_notes}
-            on:click={generateProgression}
+            on:click={() => {
+              engine.generateProgression();
+              sync();
+            }}
           >
             <IconRefresh size={16} />
           </button>
