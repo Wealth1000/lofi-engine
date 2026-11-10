@@ -6,13 +6,16 @@ import { AudioEngine } from "./lib/engine/AudioEngine";
 const SMOKE = process.argv.includes("--smoke");
 
 const engine = new AudioEngine({
-  getVolumes: () => ({ rain: 1, thunder: 1, campfire: 1, jungle: 1, main_track: 1 }),
-  setVolumes: () => {},
-  getAutoDJMode: () => "MUSIC",
-  setAutoDJMode: () => {},
-}, {
-  emit: (event: string, detail?: any) => {
-    console.log("[event]", event, detail ?? "");
+  storage: {
+    getVolumes: () => ({ rain: 1, thunder: 1, campfire: 1, jungle: 1, main_track: 1 }),
+    setVolumes: () => {},
+    getAutoDJMode: () => "MUSIC",
+    setAutoDJMode: () => {},
+  },
+  events: {
+    emit: (event: string, detail?: any) => {
+      console.log("[event]", event, detail ?? "");
+    },
   },
 });
 
