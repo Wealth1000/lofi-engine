@@ -112,10 +112,9 @@ async function main() {
     return;
   }
 
-  setupKeys();
-  console.log("Playing. Controls: Space play/pause, n new progression, +/- volume, q quit. cava visualises (Ctrl+C to quit).");
+  console.log("Playing. Audio running; cava visualises. Press Ctrl+C to quit.");
 
-  cava = spawn("cava", [], { stdio: ["ignore", "inherit", "inherit"] });
+  cava = spawn("cava", [], { stdio: "inherit" });
   cava.on("exit", () => {
     cavaExited = true;
     finish(0);
