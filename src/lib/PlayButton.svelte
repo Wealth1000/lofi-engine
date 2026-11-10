@@ -141,9 +141,8 @@
       const isBreak =
         e.detail?.phase === "shortBreak" || e.detail?.phase === "longBreak";
       const saved = storage.getVolumes() || DEFAULT_VOLUMES;
-      const vol = (engine as any).vol;
-      vol.volume.rampTo(
-        linearToDb((saved.main_track ?? 1) * (isBreak ? 0.7 : 1)),
+      engine.rampVolume(
+        (saved.main_track ?? 1) * (isBreak ? 0.7 : 1),
         0.35,
       );
     };

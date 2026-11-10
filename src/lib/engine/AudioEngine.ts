@@ -253,6 +253,10 @@ export class AudioEngine {
     this.vol.volume.value = linearToDb(value);
   }
 
+  rampVolume(linearValue: number, seconds: number) {
+    this.vol.volume.rampTo(linearToDb(linearValue), seconds);
+  }
+
   getVolume(): number {
     return this.volume;
   }
